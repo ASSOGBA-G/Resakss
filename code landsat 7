@@ -1,0 +1,114 @@
+#+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+#A procedure to perform land use classification in R based on Landsat 7 images
+#+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+#Import data into R based on the unzipped folder containing the images
+l7files<-list.files(
+  "C:/R_projects/lu/lu_sen_ben/landsat45/LE07_L1TP_205050_20001106_20170209_01_T1.tar",
+  pattern = ".TIF$",full.names = T)[c(1:5,8)]
+
+l7band<-stack(l7files)
+l7band<-crop(l7band,extent(fatickarea))
+
+#+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+#Function to perform land use classification on landsat 7 images
+#+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+lu7<-function(band,stackdir,ludir,studyarea,groundtruth,
+              model="rf"){
+  #l8dir directory for landsat 8 images,input
+  #stackdir, path of the file, stack band, output
+  #ludir, path of the land use file that will be created
+  #study area, a shapefile of the study area in the same projection with images
+  
+  #Load required packages
+  require(raster);require(rgdal);require(randomForest)
+  require(tree);require(caret);require(e1071)
+  
+  #Indices calculations and exportation of study area data (stacked)
+  landfat<-band
+  ndvi<-(landfat[[4]]-landfat[[3]])/(landfat[[4]]+landfat[[3]])
+  bsi<-((landfat[[5]]+landfat[[3]])-(landfat[[4]]+landfat[[1]]))/
+    ((landfat[[5]]+landfat[[3]])+(landfat[[4]]+landfat[[1]]))#bare soil index
+  ndbi<-(landfat[[6]]-landfat[[4]])/(landfat[[6]]+landfat[[4]])#Normalized Difference Built- up index (NDBI)
+  writeRaster(landfat,stackdir,overwrite=T)
+  landfat<-stack(landfat,ndvi,bsi,ndbi)
+  names(landfat)<-c(paste("B",1:6,sep=""),"ndvi","bsi","ndbi")
+  
+  #visualizations
+  plot(landfat[[7]],asp=NULL)
+  plot(studyarea,add=T)
+  
+  plot(landfat[[8]],asp=NULL)
+  plot(studyarea,add=T)
+  
+  plot(landfat[[9]],asp=NULL)
+  plot(studyarea,add=T)
+  
+  
+  #extraction of data from Landsat 7 bands and calculated indices
+  traindata<-extract(landfat,groundtruth)
+  
+  #add land use to extracted data
+  #the training site vector should have a LU
+  #column in its attribute table
+  for (i in 1:length(traindata)) {
+    traindata[[i]]<-as.data.frame(traindata[[i]]) 
+    traindata[[i]]$lu<-groundtruth@data$LU[i]
+  }
+  
+  #transform training data into a data.frame
+  traindata<-do.call(rbind,traindata)
+  colnames(traindata)<-c(
+    paste("B",1:6,sep=""),
+    "ndvi","bsi","ndbi","lu"
+  )
+  
+  #Modelling
+  ##calibration data selection
+  set.seed(100)#to fix randomness
+  calib_id<-createDataPartition(traindata$lu,p=.7,list = F)#70% of data used for calibration
+  nc<-ncol(traindata)
+  predictor<-traindata[calib_id,1:nc-1]
+  response<-traindata[calib_id,nc]
+  
+  #model
+  if (model=="rf"){
+    print("Random Forest")
+    rfmodel<-train(x=predictor,y=response,method = "rf",tuneLength = 3,
+                   trControl = trainControl(method = "cv"))
+  }
+  
+  if (model!="rf") {
+    print("SVM")
+    rfmodel<-train(x=predictor,y=response,method = "svmLinear",tuneLength = 3,
+                   trControl = trainControl(),preProcess = c("center","scale"))
+  }
+  
+  #visualisation of potentially important bands
+  print(plot(varImp(rfmodel)))#important bands
+  fatlcc<-predict(object = landfat,model=rfmodel)
+  print(spplot(fatlcc))
+  
+  #accuracy assessment
+  topredict<-traindata[-calib_id,1:nc-1]
+  truth<-traindata[-calib_id,nc]
+  test_predict<-predict(rfmodel,newdata=topredict)
+  cont_table<-table(test_predict,truth)
+  print(cont_table)
+  print(confusionMatrix(cont_table))
+  
+  writeRaster(fatlcc,ludir,overwrite=T)
+  output<-list(rfmodel,fatlcc,cont_table)
+  names(output)<-c("model","lu","cont_table")
+  invisible(output)
+}
+#++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+# Application of the function
+#++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+groundtruth2000<-readOGR("./fatick/studyarea/groundtruth2000.shp")#training site shapefile
+res45_2000rf<-lu7(band = l7band,
+                 stackdir = "stack45_2000.tif",
+                 ludir = "./lu/lu45_2000rf.tif",studyarea = fatickarea,
+                 groundtruth = groundtruth2000,model = "rf")
+#the res45_2000rf object is a list containg the land use map, the confusion matrix and the model itself
