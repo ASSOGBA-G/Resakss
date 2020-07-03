@@ -1,0 +1,121 @@
+##Landsat 5 TM data processing
+
+
+#landsat 5 TM 1992 data importation
+l45files92<-list.files(
+  "./landsat45/LT04_L1TP_205050_19921031_20170121_01_T1.tar",
+  pattern = ".TIF$",full.names = T)[-c(6,8)]#30 m bands
+
+l45band92<-stack(l45files92)
+l45band92<-crop(l45band92, extent(fatickarea))
+
+#+++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+#function to produce land use maps from landsat 5 TM bands
+#+++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+lu45<-function(l8dir,stackdir,ludir,studyarea,groundtruth,
+               model="rf"){
+  #l8dir: directory for landsat 5 TM images,input
+  #stackdir: path of the file, stack band, output
+  #ludir: path of the lu file (output)
+  #study area, a shapefile of the study area in the same projection with images,input
+  #model: is the type of algorithm, two are supported: "rf" for Random Forest
+  #and "SVM" for Support Vector Machine
+  
+  #load required packages
+  require(raster);require(rgdal);require(randomForest)
+  require(tree);require(caret);require(e1071)
+  
+  #indices calculation and exportation of cropped images
+  #containing only the study area data
+  band<-list.files(l8dir,pattern = ".TIF$",full.names = T)[-c(6,8)]
+  land<-stack(band)
+  landfat<-crop(land,extent(studyarea))
+  ndvi<-(landfat[[4]]-landfat[[3]])/(landfat[[4]]+landfat[[3]])
+  bsi<-((landfat[[5]]+landfat[[3]])-(landfat[[4]]+landfat[[1]]))/
+    ((landfat[[5]]+landfat[[3]])+(landfat[[4]]+landfat[[1]]))
+  nbai<-(landfat[[6]]-landfat[[4]])/(landfat[[6]]+landfat[[4]])
+  writeRaster(landfat,stackdir,overwrite=T)
+  landfat<-stack(landfat,ndvi,bsi,nbai)
+  names(landfat)<-c(paste("B",1:6,sep=""),"ndvi","bsi","nbai")
+  
+  #visualization of indices
+  plot(landfat[[7]],asp=NULL)
+  plot(studyarea,add=T)
+  
+  plot(landfat[[8]],asp=NULL)
+  plot(studyarea,add=T)
+  
+  plot(landfat[[9]],asp=NULL)
+  plot(studyarea,add=T)
+  
+  #data extraction
+  traindata<-extract(landfat,groundtruth)
+  
+  #add land use info to extracted data
+  #the groundtruth data (vector) should have
+  # a column named LU in its attribute table
+  for (i in 1:length(traindata)) {
+    traindata[[i]]<-as.data.frame(traindata[[i]]) 
+    traindata[[i]]$lu<-groundtruth@data$LU[i]
+  }
+  
+  #transform training data into a data.frame
+  traindata<-do.call(rbind,traindata)
+  colnames(traindata)<-c(
+    paste("B",1:6,sep=""),
+    "ndvi","bsi","nbai","lu"
+  )
+  
+  ###Modelling
+  ##calibration data selection
+  set.seed(100)#to fix randomness
+  calib_id<-createDataPartition(traindata$lu,p=.7,list = F)#70% of the data is used for calibration
+  nc<-ncol(traindata)
+  predictor<-traindata[calib_id,1:nc-1]
+  response<-traindata[calib_id,nc]
+  #visualisation of potentially important bands
+  lc.tr<-tree(lu~.,traindata)
+  plot(lc.tr);text(lc.tr)
+  
+  #model
+  if (model=="rf"){
+    print("Random Forest")
+    rfmodel<-train(x=predictor,y=response,method = "rf",tuneLength = 3,
+                 trControl = trainControl(method = "cv"))
+    }
+  
+  if (model!="rf") {
+    print("SVM")
+    rfmodel<-train(x=predictor,y=response,method = "svmLinear",tuneLength = 3,
+                 trControl = trainControl(),preProcess = c("center","scale"))
+    }
+  
+  #visualization of predictors weights
+  print(plot(varImp(rfmodel)))#important bands
+  
+  #creation of land use map
+  fatlcc<-predict(object = landfat,model=rfmodel)
+  print(spplot(fatlcc))#visualization
+  
+  #accuracy assessment
+  topredict<-traindata[-calib_id,1:nc-1]
+  truth<-traindata[-calib_id,nc]
+  test_predict<-predict(rfmodel,newdata=topredict)
+  cont_table<-table(test_predict,truth)
+  print(confusionMatrix(cont_table))
+  
+  writeRaster(fatlcc,ludir,overwrite=T)
+  output<-list(rfmodel,fatlcc,cont_table)
+  names(output)<-c("model","lu","cont_table")
+  invisible(output)
+}
+#++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+#Example of application of the previous function
+#++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+groundtruth92<-readOGR("./fatick/studyarea/groundtruth92_.shp")#importing training sites shapefile
+res45_92rf<-lu45(l8dir = "./landsat45/LT04_L1TP_205050_19921031_20170121_01_T1.tar",
+               stackdir = "stack4592.tif",
+               ludir = "./lu/lu45_92rf.tif",studyarea = fatickarea,
+               groundtruth = groundtruth2000,model = "rf")
+#the res45_92 variable is a list containing three information: the land use map, the confusion matrix and
+#the model itself.
