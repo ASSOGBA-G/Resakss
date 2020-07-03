@@ -16,7 +16,7 @@ l7band<-crop(l7band,extent(fatickarea))
 
 lu7<-function(band,stackdir,ludir,studyarea,groundtruth,
               model="rf"){
-  #l8dir directory for landsat 8 images,input
+  #l8dir directory for landsat 7 images,input
   #stackdir, path of the file, stack band, output
   #ludir, path of the land use file that will be created
   #study area, a shapefile of the study area in the same projection with images
