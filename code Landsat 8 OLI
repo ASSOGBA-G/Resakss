@@ -1,0 +1,103 @@
+
+
+
+#:)
+lu<-function(l8dir,stackdir,ludir,studyarea,groundtruth){
+  #l8dir directory for landsat 8 images,input
+  #stackdir, path of the stacked band
+  #ludir, path of the file lu, output
+  #study area, a shapefile of the study area in the same projection with images,input
+  require(raster);require(rgdal);require(randomForest)
+  require(tree);require(caret);require(e1071)
+  
+  
+  band<-list.files(l8dir,pattern = ".TIF$",full.names = T)[-c(2,3,10,11,12)]
+  #Tir1 band
+  b10<-raster(list.files(l8dir,pattern = ".TIF$",full.names = T)[2])
+  land<-stack(stackdir)
+  b10<-resample(b10,land[[1]])
+  landfat<-crop(land,extent(studyarea))
+  ndvi<-(landfat[[5]]-landfat[[4]])/(landfat[[5]]+landfat[[4]])
+  bsi<-((landfat[[6]]+landfat[[4]])-(landfat[[5]]+landfat[[2]]))/
+    ((landfat[[6]]+landfat[[4]])+(landfat[[5]]+landfat[[2]]))
+  #dry built up index
+  dbi<-((land[[2]]-b10)/(land[[2]]+b10))-ndvi
+  #writeRaster(landfat,stackdir,overwrite=T)
+  landfat<-stack(landfat,ndvi,bsi,dbi)
+  names(landfat)<-c(paste("B",1:7,sep=""),"ndvi","bsi","dbi")
+  
+  
+  plot(landfat[[10]],asp=NULL)
+  plot(studyarea,add=T)
+  
+  #model application
+  #extraction of data from bands and calculated indices
+  traindata<-extract(landfat,groundtruth)
+  
+  #add land use to extracted data
+  for (i in 1:length(traindata)) {
+    traindata[[i]]<-as.data.frame(traindata[[i]]) 
+    traindata[[i]]$lu<-groundtruth@data$LU[i]
+  }
+  
+  #transform traindata into a data.frame
+  traindata<-do.call(rbind,traindata)
+  colnames(traindata)<-c(
+    paste("B",1:7,sep=""),
+    "ndvi","bsi","dbi","lu"
+  )
+  
+  ###Modelling
+  ##calibration data selection
+  set.seed(100)#to fix randomness
+  calib_id<-createDataPartition(traindata$lu,p=.7,list = F)
+  predictor<-traindata[calib_id,1:10]
+  response<-traindata[calib_id,11]
+  
+  #model
+  rfmodel<-train(x=predictor,y=response,method = "rf",tuneLength = 3,
+                 trControl = trainControl(method = "cv"))
+  
+  #visualisation of potentially important bands
+  print(plot(varImp(rfmodel)))#important bands
+  fatlcc<-predict(object = landfat,model=rfmodel)
+  print(spplot(fatlcc))#visualization of lu map
+  
+  #accuracy assessment
+  topredict<-traindata[-calib_id,1:10]
+  truth<-traindata[-calib_id,11]
+  test_predict<-predict(rfmodel,newdata=topredict)
+  cont_table<-table(test_predict,truth)
+  print(cont_table)
+  print(confusionMatrix(cont_table))
+  
+  #export result and storage in an R variable if needed, see example
+  writeRaster(fatlcc,ludir,overwrite=T)
+  output<-list(rfmodel,fatlcc,cont_table)
+  names(output)<-c("model","lu","cont_table")
+  invisible(output)
+}
+
+#:)++++++++
+groundtruth19<-readOGR("M:/Resakss/fatick_groundtruth/groundtruth.shp")#load training sites
+res19<-lu(l8dir = "M:/Resakss/images_clean/LC08_L1TP_205050_20191018_20191029_01_T1",
+          stackdir = "M:/Resakss/stack/l19.tif",ludir = "M:/Resakss/lu/fatlu19.tif",
+          studyarea = fatick,groundtruth = groundtruth19)#2019
+#res19 contains the lu map, the confusion matrix and the model. It is a list
+
+#Example of area calcuation and change detection
+
+#land use class area calculation in 2019
+area19<-crosstab(res19[[2]],res19[[2]])#res19[[2]] is 2019 land use
+area2019<-as.matrix(area2019)
+area2019<-apply(area2019,2,function(x){
+     sum(x)*900/10000# conversion into ha, one pixel is 30m*30m =900m2
+  })
+#change detection between 2013 and 2019
+#suppose res2013 is the output of the lu function in 2013
+change<-crosstab(res19[[2]],res13[[2]])
+#this gives the number of unchanged pixels and the number of pixels of
+#each class which turn into another class
+#based on the number of pixels (changed and unchanged), the area can be
+#easily calculated knowing 1 pixel = 30m*30m = 900m2
+
